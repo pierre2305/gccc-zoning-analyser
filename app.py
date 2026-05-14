@@ -686,5 +686,4 @@ if st.session_state["complete"] and st.session_state["results"]:
     st.caption(
         f"Results sorted by zone category. "
         f"Excel file includes colour coding and a Legend sheet. "
-        f"Latitude and Longitude are in the last two columns."
     )
