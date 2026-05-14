@@ -592,11 +592,126 @@ def _empty_zone_result(reason: str) -> dict:
     }
 
 
+# ===========================================================================
+# BCC — Brisbane City Council Zoning
+# Uses OpenDataSoft API (data.brisbane.qld.gov.au) — always current version
+# ===========================================================================
+
+BCC_ODS_URL = (
+    "https://data.brisbane.qld.gov.au/api/explore/v2.1/catalog/datasets"
+    "/cp14-zoning-overlay/records"
+)
+
+# BCC zone code → broad category mapping
+BCC_ZONE_CATEGORY = {
+    "LDR":  "Low Density Residential",
+    "CR":   "Character Residential",
+    "LMR":  "Low-Medium Density Residential",
+    "MDR":  "Medium Density Residential",
+    "HDR":  "High Density Residential",
+    "EC":   "Emerging Community",
+    "RU":   "Rural",
+    "CN":   "Conservation",
+    "OS":   "Open Space",
+    "SR":   "Sport and Recreation",
+    "TA":   "Tourist Accommodation",
+    "NC":   "Neighbourhood Centre",
+    "DC":   "District Centre",
+    "MC":   "Major Centre",
+    "PC":   "Principal Centre",
+    "LII":  "Low Impact Industry",
+    "MII":  "Medium Impact Industry",
+    "HII":  "High Impact Industry",
+    "SI":   "Special Industry",
+    "SP":   "Special Purpose",
+}
+
+# Sort order for Excel/display (residential zones first)
+BCC_ZONE_SORT = {
+    "Low Density Residential":        0,
+    "Character Residential":          1,
+    "Low-Medium Density Residential": 2,
+    "Medium Density Residential":     3,
+    "High Density Residential":       4,
+    "Emerging Community":             5,
+    "Tourist Accommodation":          6,
+}
+
+# Colour coding for Excel (matches ZONE_COLOURS style)
+BCC_ZONE_COLOURS = {
+    "Low Density Residential":        "C6EFCE",   # light green
+    "Character Residential":          "CCFFCC",   # lighter green
+    "Low-Medium Density Residential": "FFEB9C",   # light yellow
+    "Medium Density Residential":     "FFECC7",   # light orange
+    "High Density Residential":       "FFC7CE",   # light red
+    "Emerging Community":             "BDD7EE",   # light blue
+    "Tourist Accommodation":          "E2CFFE",   # light purple
+    "Lookup failed":                  "D9D9D9",   # grey
+}
+
+
+def get_bcc_zone(lat: float, lng: float) -> dict:
+    """
+    Look up Brisbane City Council zoning for a WGS84 coordinate using the
+    BCC OpenDataSoft API (data.brisbane.qld.gov.au).
+
+    Returns a dict with the same key structure as get_residential_density()
+    so it can flow through the same pipeline.
+    """
+    params = {
+        "where":  f"within_distance(geo_shape, geom'POINT({lng} {lat})', 20m)",
+        "limit":  1,
+        "select": "zone_code,lvl1_zone,lvl2_zone,zone_prec_desc,np_prec,zone_prec",
+    }
+
+    for attempt, timeout_secs in enumerate([15, 25, 40], start=1):
+        try:
+            resp = requests.get(BCC_ODS_URL, params=params, timeout=timeout_secs)
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+
+            if not results:
+                return _empty_zone_result("Address is outside BCC boundary or unzoned")
+
+            r = results[0]
+            zone_code = r.get("zone_code", "") or ""
+            lvl1      = r.get("lvl1_zone", "") or ""
+            lvl2      = r.get("lvl2_zone", "") or ""
+            prec_desc = r.get("zone_prec_desc", "") or ""
+            np_prec   = r.get("np_prec", "") or ""
+            zone_prec = r.get("zone_prec", "") or ""
+
+            zone_cat  = BCC_ZONE_CATEGORY.get(zone_code, lvl1.title() if lvl1 else "Other")
+
+            return {
+                "zone_name":     lvl2 or lvl1,
+                "zone_cat":      zone_cat,
+                "zone_precinct": prec_desc,
+                "zone_desc":     prec_desc or lvl2 or lvl1,
+                "zone_code":     zone_code,
+                "cat_desc":      lvl1,
+                "ovl_cat":       np_prec,
+                "ovl2_desc":     zone_prec,
+                "api_error":     None,
+            }
+
+        except requests.exceptions.Timeout:
+            if attempt == 3:
+                return _empty_zone_result("BCC API timeout after 3 attempts")
+            print(f"    ⏱  BCC API timeout (attempt {attempt}/3) — retrying in 2s...")
+            time.sleep(2)
+            continue
+        except Exception as e:
+            return _empty_zone_result(str(e))
+
+    return _empty_zone_result("BCC API failed")
+
+
 # ---------------------------------------------------------------------------
 # STEP 4 — ORCHESTRATE & OUTPUT
 # ---------------------------------------------------------------------------
 
-def analyse_addresses(addresses: list[dict], output_file: str = "zoning_results.csv") -> list[dict]:
+def analyse_addresses(addresses: list[dict], output_file: str = "zoning_results.csv", council: str = "GCCC") -> list[dict]:
     """
     Main pipeline: geocode each address then query GCCC for its zoning.
     Writes results to CSV and returns the list of result dicts.
@@ -606,7 +721,7 @@ def analyse_addresses(addresses: list[dict], output_file: str = "zoning_results.
     failed_zoning  = []
 
     print(f"\n{'='*60}")
-    print(f"  Analysing {len(addresses)} addresses")
+    print(f"  Analysing {len(addresses)} addresses [{council}]")
     print(f"  Output: {output_file}")
     print(f"{'='*60}\n")
 
@@ -633,9 +748,12 @@ def analyse_addresses(addresses: list[dict], output_file: str = "zoning_results.
         result["lat"] = round(lat, 6)
         result["lng"] = round(lng, 6)
 
-        # --- Zone lookup ---
+        # --- Zone lookup — dispatch to correct council API ---
         time.sleep(ARCGIS_DELAY)
-        zone = get_residential_density(lat, lng)
+        if council == "BCC":
+            zone = get_bcc_zone(lat, lng)
+        else:
+            zone = get_residential_density(lat, lng)
         result.update(zone)
 
         if zone["api_error"]:
@@ -650,7 +768,7 @@ def analyse_addresses(addresses: list[dict], output_file: str = "zoning_results.
 
     # --- Write CSV ---
     _write_csv(results, output_file)
-    write_excel(results, output_file)
+    write_excel(results, output_file, council=council)
 
     # --- Summary ---
     print(f"\n{'='*60}")
@@ -709,7 +827,7 @@ EXCEL_HEADERS = {
 }
 
 
-def write_excel(results: list[dict], filepath: str) -> None:
+def write_excel(results: list[dict], filepath: str, council: str = 'GCCC') -> None:
     """
     Write results to a colour-coded, sorted Excel file.
     - Sorted by zone_cat (Low Density → Medium → Higher → High Rise → Other)
@@ -738,6 +856,8 @@ def write_excel(results: list[dict], filepath: str) -> None:
         "High Rise":                  3,
         "Lookup failed":              5,
     }
+    if council == "BCC":
+        sort_order = BCC_ZONE_SORT
     sorted_results = sorted(
         results,
         key=lambda r: (sort_order.get(r.get("zone_cat", ""), 4), r.get("address", ""))
@@ -793,7 +913,8 @@ def write_excel(results: list[dict], filepath: str) -> None:
 
         row_idx = ws.max_row
         zone_cat = row_data.get("zone_cat", "")
-        fill_hex  = ZONE_COLOURS.get(zone_cat, ZONE_COLOUR_DEFAULT)
+        colour_lookup = BCC_ZONE_COLOURS if council == "BCC" else ZONE_COLOURS
+        fill_hex  = colour_lookup.get(zone_cat, ZONE_COLOUR_DEFAULT)
         row_fill  = PatternFill("solid", start_color=fill_hex)
 
         for col_idx, cell in enumerate(ws[row_idx], start=1):

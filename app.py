@@ -220,7 +220,7 @@ def style_results(df: pd.DataFrame) -> pd.DataFrame.style:
 # ---------------------------------------------------------------------------
 # Helper — run analysis with live progress updates
 # ---------------------------------------------------------------------------
-def run_analysis(records: list[dict], progress_bar, status_text, results_placeholder):
+def run_analysis(records: list[dict], progress_bar, status_text, results_placeholder, council: str = 'GCCC'):
     """
     Process each address one by one, updating the UI live.
     Returns the full results list.
@@ -267,7 +267,10 @@ def run_analysis(records: list[dict], progress_bar, status_text, results_placeho
             result["api_error"] = "Geocoding failed"
         else:
             time.sleep(delay_api)
-            zone = ga.get_residential_density(lat, lng)
+            if council == "BCC":
+                zone = ga.get_bcc_zone(lat, lng)
+            else:
+                zone = ga.get_residential_density(lat, lng)
             result.update(zone)
 
         results.append(result)
@@ -344,7 +347,7 @@ def show_summary_cards(results: list[dict]):
 # ---------------------------------------------------------------------------
 # Helper — build download files
 # ---------------------------------------------------------------------------
-def build_downloads(results: list[dict]) -> tuple[bytes, bytes]:
+def build_downloads(results: list[dict], council: str = 'GCCC') -> tuple[bytes, bytes]:
     """Returns (csv_bytes, excel_bytes)."""
     # CSV
     fieldnames = [
@@ -365,7 +368,7 @@ def build_downloads(results: list[dict]) -> tuple[bytes, bytes]:
     try:
         tmp_csv  = tempfile.mktemp(suffix=".csv")
         tmp_xlsx = tmp_csv.replace(".csv", ".xlsx")
-        ga.write_excel(results, tmp_csv)
+        ga.write_excel(results, tmp_csv, council=council)
         if os.path.exists(tmp_xlsx):
             with open(tmp_xlsx, "rb") as f:
                 excel_bytes = f.read()
@@ -396,6 +399,14 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Settings")
+
+    st.subheader("Council")
+    council = st.selectbox(
+        "Which council?",
+        ["GCCC — Gold Coast City Council", "BCC — Brisbane City Council"],
+        help="Select the council area for the properties you are analysing."
+    )
+    council_code = "BCC" if council.startswith("BCC") else "GCCC"
 
     st.subheader("Geocoder")
     geocoder = st.selectbox(
@@ -525,9 +536,10 @@ with col_info:
 # Run analysis
 # ---------------------------------------------------------------------------
 if run_btn and records:
-    st.session_state["results"]  = []
-    st.session_state["complete"] = False
-    st.session_state["running"]  = True
+    st.session_state["results"]      = []
+    st.session_state["complete"]     = False
+    st.session_state["running"]      = True
+    st.session_state["council_code"] = council_code
 
     st.divider()
     st.subheader("⏳ Processing")
@@ -542,7 +554,8 @@ if run_btn and records:
                 records,
                 progress_bar,
                 status_text,
-                results_placeholder
+                results_placeholder,
+                council=council_code,
             )
             st.session_state["results"]  = results
             st.session_state["complete"] = True
@@ -570,10 +583,12 @@ if st.session_state["complete"] and st.session_state["results"]:
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Sort results
+    _council = st.session_state.get("council_code", "GCCC")
+    _sort    = ga.BCC_ZONE_SORT if _council == "BCC" else ZONE_SORT_ORDER
     sorted_results = sorted(
         results,
         key=lambda r: (
-            ZONE_SORT_ORDER.get(r.get("zone_cat", ""), 4),
+            _sort.get(r.get("zone_cat", ""), 4),
             r.get("address", "")
         )
     )
@@ -645,7 +660,7 @@ if st.session_state["complete"] and st.session_state["results"]:
     st.divider()
     st.subheader("💾 Download Results")
 
-    csv_bytes, excel_bytes = build_downloads(sorted_results)
+    csv_bytes, excel_bytes = build_downloads(sorted_results, council=st.session_state.get('council_code', 'GCCC'))
 
     dl1, dl2, dl3 = st.columns(3)
     with dl1:
@@ -686,4 +701,5 @@ if st.session_state["complete"] and st.session_state["results"]:
     st.caption(
         f"Results sorted by zone category. "
         f"Excel file includes colour coding and a Legend sheet. "
+        f"Latitude and Longitude are in the last two columns."
     )
